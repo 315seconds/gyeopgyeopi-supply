@@ -1,17 +1,19 @@
 import { supabase } from '../supabaseClient'
 
-const EDGE_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-push`
-
-/**
- * 특정 유저들에게 푸시 알림 발송
- * @param {string[]} userIds
- * @param {object}   payload { title, body, url }
- */
 async function pushToUsers(userIds, payload) {
-  if (!userIds?.length) return
+  console.log('pushToUsers 호출:', userIds, payload)
+  if (!userIds?.length) {
+    console.log('유저 없음 — 종료')
+    return
+  }
   try {
     const { data: { session } } = await supabase.auth.getSession()
-    await fetch(EDGE_URL, {
+    console.log('세션:', session?.access_token ? '있음' : '없음')
+
+    const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-push`
+    console.log('요청 URL:', url)
+
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type':  'application/json',
@@ -19,40 +21,38 @@ async function pushToUsers(userIds, payload) {
       },
       body: JSON.stringify({ user_ids: userIds, ...payload }),
     })
+    const text = await res.text()
+    console.log('응답 status:', res.status, '내용:', text)
   } catch (err) {
-    console.error('푸시 발송 실패:', err)
+    console.error('pushToUsers 에러:', err)
   }
 }
 
-/**
- * 특정 역할의 모든 유저에게 푸시
- */
 async function pushToRole(role, payload) {
-  const { data: users } = await supabase
+  console.log('pushToRole 시작 — role:', role)
+  const { data: users, error } = await supabase
     .from('users')
     .select('id')
     .eq('role', role)
     .eq('is_active', true)
+  console.log('유저 조회 결과:', users, '에러:', error)
   if (users?.length) await pushToUsers(users.map(u => u.id), payload)
 }
 
-/**
- * 특정 지점 점장에게 푸시
- */
 async function pushToBranchManager(branchId, payload) {
-  const { data: users } = await supabase
+  console.log('pushToBranchManager — branchId:', branchId)
+  const { data: users, error } = await supabase
     .from('users')
     .select('id')
     .eq('role', 'manager')
     .eq('branch_id', branchId)
     .eq('is_active', true)
+  console.log('점장 조회 결과:', users, '에러:', error)
   if (users?.length) await pushToUsers(users.map(u => u.id), payload)
 }
 
-// ── 상황별 알림 함수들 ─────────────────────────────────────
-
-/** 점장 → 사장: 신규 주문 */
 export async function notifyNewOrder(branchName, orderNumber) {
+  console.log('notifyNewOrder 호출:', branchName, orderNumber)
   await pushToRole('owner', {
     title: '새 주문이 들어왔습니다',
     body:  `${branchName} — ${orderNumber}`,
@@ -60,8 +60,8 @@ export async function notifyNewOrder(branchName, orderNumber) {
   })
 }
 
-/** 사장 → 스태프 + 점장: 주문 승인 */
 export async function notifyOrderApproved(branchId, branchName, orderNumber) {
+  console.log('notifyOrderApproved 호출:', branchId, branchName, orderNumber)
   await pushToRole('staff', {
     title: '주문이 승인됐습니다',
     body:  `${branchName} ${orderNumber} — 출고 준비를 시작해주세요`,
@@ -74,8 +74,8 @@ export async function notifyOrderApproved(branchId, branchName, orderNumber) {
   })
 }
 
-/** 스태프 → 사장 + 점장: 출고 완료 */
 export async function notifyOrderShipped(branchId, branchName, orderNumber) {
+  console.log('notifyOrderShipped 호출:', branchId, branchName, orderNumber)
   await pushToRole('owner', {
     title: '출고가 완료됐습니다',
     body:  `${branchName} ${orderNumber} 출고 완료`,
@@ -88,8 +88,8 @@ export async function notifyOrderShipped(branchId, branchName, orderNumber) {
   })
 }
 
-/** 스태프 → 사장: 재고 경과 경고 */
 export async function notifyAgeWarning(productName, batchCode, days) {
+  console.log('notifyAgeWarning 호출:', productName, batchCode, days)
   await pushToRole('owner', {
     title: '재고 경과 경고',
     body:  `${productName} ${batchCode} — ${days}일 경과. 우선 출고 필요`,
@@ -97,8 +97,8 @@ export async function notifyAgeWarning(productName, batchCode, days) {
   })
 }
 
-/** 출고 시 재고 부족 */
 export async function notifyStockShortage(branchName, productName, shortage) {
+  console.log('notifyStockShortage 호출:', branchName, productName, shortage)
   await pushToRole('owner', {
     title: '재고 부족 알림',
     body:  `${branchName} ${productName} — ${shortage}kg 부족 출고됨`,
