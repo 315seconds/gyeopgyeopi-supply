@@ -57,6 +57,14 @@ export default function ManagerNewOrder() {
       }))
     )
 
+    // 트리거로 채번된 실제 order_number 조회
+    const { data: freshOrder } = await supabase
+      .from('orders')
+      .select('order_number')
+      .eq('id', order.id)
+      .single()
+    const orderNumber = freshOrder?.order_number ?? order.id
+
     await notifyRole('owner', {
       type:   'new_order',
       title:  `${branchName} 주문 요청`,
@@ -64,9 +72,9 @@ export default function ManagerNewOrder() {
       ref_id: order.id,
     })
     // 웹 푸시 발송
-    await notifyNewOrder(branchName, order.order_number)
+    await notifyNewOrder(branchName, orderNumber)
 
-    setDone(order.order_number)
+    setDone(orderNumber)
     setSaving(false)
     setItems([{ product_id: '', qty: '' }])
     setMemo('')
