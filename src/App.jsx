@@ -10,6 +10,7 @@ import OwnerOrders     from './pages/owner/Orders'
 import OwnerInventory  from './pages/owner/Inventory'
 import PurchaseStats   from './pages/owner/PurchaseStats'
 import Settlement      from './pages/owner/Settlement'
+import Settings       from './pages/owner/Settings'
 
 // Manager
 import ManagerNewOrder  from './pages/manager/NewOrder'
@@ -60,6 +61,7 @@ function AppRoutes() {
             <Route path="/owner/inventory"  element={<OwnerInventory />} />
             <Route path="/owner/stats"      element={<PurchaseStats />} />
             <Route path="/owner/settlement" element={<Settlement />} />
+            <Route path="/owner/settings"   element={<Settings />} />
             <Route path="*"                 element={<Navigate to="/owner" replace />} />
           </>
         )}

@@ -3,18 +3,17 @@ import { useAuth } from '../../contexts/AuthContext'
 import { supabase } from '../../supabaseClient'
 import { shipOrder } from '../../utils/fifo'
 import { notifyRole, notifyBranchManager } from '../../utils/notifications'
+import { notifyOrderShipped, notifyStockShortage } from '../../utils/sendPush'
 import BarcodeScanner from '../../components/BarcodeScanner'
 
 const STATUS_LABEL = { pending: '대기중', approved: '승인됨', shipped: '출고완료', cancelled: '취소됨' }
 
 export default function StaffOrders() {
   const { profile } = useAuth()
-  const [orders, setOrders]     = useState([])
-  const [filter, setFilter]     = useState('approved')
-  const [loading, setLoading]   = useState(true)
-  const [expanded, setExpanded] = useState(null)
-  const [shipping, setShipping] = useState(null)  // 출고 처리 중인 orderId
-  const [scanTarget, setScanTarget] = useState(null) // 바코드 스캔 중인 orderId
+  const [orders, setOrders]       = useState([])
+  const [filter, setFilter]       = useState('approved')
+  const [loading, setLoading]     = useState(true)
+  const [shipTarget, setShipTarget] = useState(null) // 출고 처리 중인 주문
 
   useEffect(() => { fetchOrders() }, [filter])
 
@@ -27,72 +26,91 @@ export default function StaffOrders() {
     setLoading(false)
   }
 
-  async function handleShip(orderId, branchId) {
-    if (!confirm('출고 완료 처리하시겠습니까? 재고가 자동으로 차감됩니다.')) return
-    setShipping(orderId)
+  async function startShip(order) {
+    // 주문 품목 + FIFO 배치 목록 로드
+    const { data: items } = await supabase
+      .from('order_items')
+      .select('*, products(name, unit)')
+      .eq('order_id', order.id)
 
-    const { shortages } = await shipOrder(orderId, profile.id)
+    // 각 품목의 FIFO 배치 목록 조회
+    const itemsWithBatches = await Promise.all(items.map(async item => {
+      const { data: batches } = await supabase
+        .from('inventory_batches')
+        .select('id, batch_code, barcode, remaining_weight_kg, sell_price, seq, processed_date')
+        .eq('product_id', item.product_id)
+        .eq('status', 'available')
+        .gt('remaining_weight_kg', 0)
+        .order('seq', { ascending: true })
+      return { ...item, batches: batches ?? [], scanned: [] }
+    }))
 
-    // 알림 발송
+    setShipTarget({ order, items: itemsWithBatches, skipped: false })
+  }
+
+  async function completeShip(skipped = false) {
+    if (!shipTarget) return
+
+    const { shortages } = await shipOrder(shipTarget.order.id, profile.id)
+
     await notifyRole('owner', {
-      type: 'shipped', title: '출고가 완료됐습니다',
-      body: `${orders.find(o => o.id === orderId)?.branch_name} 주문 출고 완료`,
-      ref_id: orderId,
+      type: 'shipped',
+      title: '출고가 완료됐습니다',
+      body: `${shipTarget.order.branch_name} 주문 출고 완료${skipped ? ' (스캔 건너뜀)' : ''}`,
+      ref_id: shipTarget.order.id,
     })
-    await notifyBranchManager(branchId, {
-      type: 'shipped', title: '물건을 준비했습니다',
+    await notifyBranchManager(shipTarget.order.branch_id, {
+      type: 'shipped',
+      title: '물건을 준비했습니다',
       body: '곧 배송됩니다. 확인해주세요!',
-      ref_id: orderId,
+      ref_id: shipTarget.order.id,
     })
 
     if (shortages.length > 0) {
-      alert(`일부 품목 재고 부족으로 요청량보다 적게 출고됐습니다.\n확인 후 사장님께 보고해주세요.`)
+      alert('일부 품목 재고 부족으로 요청량보다 적게 출고됐습니다.\n사장님께 보고해주세요.')
+      for (const s of shortages) {
+        await notifyStockShortage(
+          shipTarget.order.branch_name,
+          s.product_id,
+          s.shortage
+        )
+      }
     }
+    // 출고완료 웹 푸시
+    await notifyOrderShipped(
+      shipTarget.order.branch_id,
+      shipTarget.order.branch_name,
+      shipTarget.order.order_number
+    )
 
-    setShipping(null)
-    setExpanded(null)
+    setShipTarget(null)
     fetchOrders()
   }
 
-  async function handleScan(code) {
-    const { data } = await supabase
-      .from('inventory_batches')
-      .select('id, batch_code, product_id, remaining_weight_kg, sell_price, products(name)')
-      .or(`barcode.eq.${code},batch_code.eq.${code}`)
-      .single()
-
-    setScanTarget(null)
-    if (!data) { alert('해당 배치를 찾을 수 없습니다'); return }
-    alert(`✓ ${data.products?.name}\n잔량: ${data.remaining_weight_kg}kg\n출고단가: ${data.sell_price?.toLocaleString()}원/kg`)
+  // 출고 처리 화면
+  if (shipTarget) {
+    return (
+      <ShipProcess
+        target={shipTarget}
+        onUpdate={setShipTarget}
+        onComplete={completeShip}
+        onCancel={() => setShipTarget(null)}
+      />
+    )
   }
 
   return (
     <div className="page">
-      <div className="top-bar">
-        <h1>주문 출고</h1>
-        <button className="btn" style={{ fontSize: '12px', padding: '6px 12px' }} onClick={() => setScanTarget('check')}>
-          재고 스캔
-        </button>
-      </div>
+      <div className="top-bar"><h1>주문 출고</h1></div>
 
-      {/* 바코드 스캐너 (재고 확인용) */}
-      {scanTarget === 'check' && (
-        <div className="card">
-          <BarcodeScanner onScan={handleScan} onClose={() => setScanTarget(null)} />
-        </div>
-      )}
-
-      {/* 필터 */}
       <div style={{ display: 'flex', gap: '6px', marginBottom: '14px' }}>
         {['approved', 'all', 'shipped'].map(s => (
-          <button
-            key={s}
-            className="btn"
+          <button key={s} className="btn"
             style={{
               padding: '6px 14px', fontSize: '13px',
-              background: filter === s ? 'var(--text)' : '',
-              color: filter === s ? 'var(--bg)' : '',
-              borderColor: filter === s ? 'var(--text)' : '',
+              background: filter === s ? 'var(--burgundy)' : '',
+              color: filter === s ? 'var(--cream-2)' : '',
+              borderColor: filter === s ? 'var(--burgundy-dark)' : '',
             }}
             onClick={() => setFilter(s)}
           >
@@ -102,43 +120,37 @@ export default function StaffOrders() {
       </div>
 
       {filter === 'approved' && orders.length > 0 && (
-        <div className="alert alert-warning">
-          출고 대기 {orders.length}건 — 사장님 승인된 주문입니다
-        </div>
+        <div className="alert alert-warning">출고 대기 {orders.length}건</div>
       )}
 
       {loading && <div className="loading">로딩 중...</div>}
       {!loading && orders.length === 0 && <div className="empty">해당 주문이 없습니다</div>}
 
       {orders.map(order => (
-        <StaffOrderCard
+        <OrderCard
           key={order.id}
           order={order}
-          expanded={expanded === order.id}
-          onToggle={() => setExpanded(expanded === order.id ? null : order.id)}
-          onShip={() => handleShip(order.id, order.branch_id)}
-          shipping={shipping === order.id}
+          onShip={() => startShip(order)}
         />
       ))}
     </div>
   )
 }
 
-function StaffOrderCard({ order, expanded, onToggle, onShip, shipping }) {
-  const [items, setItems] = useState([])
+// ── 주문 카드 ────────────────────────────────────────────────
+function OrderCard({ order, onShip }) {
+  const [expanded, setExpanded] = useState(false)
+  const [items, setItems]       = useState([])
 
-  async function loadItems() {
-    if (items.length) return
-    const { data } = await supabase
-      .from('order_items')
-      .select('*, products(name, unit)')
-      .eq('order_id', order.id)
-    setItems(data ?? [])
-  }
-
-  function handleToggle() {
-    if (!expanded) loadItems()
-    onToggle()
+  async function handleToggle() {
+    if (!expanded && !items.length) {
+      const { data } = await supabase
+        .from('order_items')
+        .select('*, products(name, unit)')
+        .eq('order_id', order.id)
+      setItems(data ?? [])
+    }
+    setExpanded(e => !e)
   }
 
   const date = new Date(order.requested_at).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' })
@@ -168,22 +180,293 @@ function StaffOrderCard({ order, expanded, onToggle, onShip, shipping }) {
             </div>
           ))}
           {order.memo && (
-            <div style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>
-              점장 메모: {order.memo}
-            </div>
+            <div style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>메모: {order.memo}</div>
           )}
-
           {order.status === 'approved' && (
-            <button
-              className="btn btn-ship btn-full"
-              style={{ marginTop: '12px' }}
-              disabled={shipping}
-              onClick={onShip}
-            >
-              {shipping ? '처리 중...' : '출고 완료 처리 (FIFO 자동차감)'}
+            <button className="btn btn-ship btn-full" style={{ marginTop: '12px' }} onClick={onShip}>
+              출고 시작 →
             </button>
           )}
         </>
+      )}
+    </div>
+  )
+}
+
+// ── 출고 처리 화면 (FIFO 스캔 검증) ──────────────────────────
+function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
+  const [currentItemIdx, setCurrentItemIdx] = useState(0)
+  const [scanning, setScanning]             = useState(false)
+  const [scanResult, setScanResult]         = useState(null) // { ok, message, type }
+  const [confirming, setConfirming]         = useState(false)
+
+  const { order, items } = target
+  const currentItem = items[currentItemIdx]
+
+  // 각 품목의 스캔 진행 상태 계산
+  function getItemProgress(item) {
+    const needed  = item.requested_qty
+    const scanned = item.scanned.reduce((s, b) => s + b.allocated, 0)
+    return { needed, scanned, done: scanned >= needed - 0.001 }
+  }
+
+  const allDone = items.every(item => getItemProgress(item).done)
+  const progress = getItemProgress(currentItem)
+
+  async function handleScan(code) {
+    setScanning(false)
+    setScanResult(null)
+
+    // 스캔한 바코드로 배치 찾기
+    const { data: scannedBatch } = await supabase
+      .from('inventory_batches')
+      .select('id, batch_code, barcode, remaining_weight_kg, sell_price, seq, processed_date, product_id')
+      .or(`barcode.eq.${code},batch_code.eq.${code}`)
+      .single()
+
+    if (!scannedBatch) {
+      setScanResult({ ok: false, type: 'error', message: '등록되지 않은 바코드입니다' })
+      return
+    }
+
+    // 현재 품목과 일치하는지 확인
+    if (scannedBatch.product_id !== currentItem.product_id) {
+      const { data: p } = await supabase.from('products').select('name').eq('id', scannedBatch.product_id).single()
+      setScanResult({
+        ok: false, type: 'error',
+        message: `잘못된 품목입니다\n스캔: ${p?.name ?? '알 수 없음'}\n필요: ${currentItem.products?.name}`,
+      })
+      return
+    }
+
+    // 이미 스캔한 배치인지 확인
+    if (currentItem.scanned.find(s => s.id === scannedBatch.id)) {
+      setScanResult({ ok: false, type: 'warning', message: '이미 스캔한 배치입니다' })
+      return
+    }
+
+    // FIFO 순서 검증
+    const expectedBatches = currentItem.batches.filter(b => !currentItem.scanned.find(s => s.id === b.id))
+    const expectedNext    = expectedBatches[0]
+
+    if (expectedNext && scannedBatch.seq > expectedNext.seq) {
+      setScanResult({
+        ok: false, type: 'fifo',
+        message: `FIFO 순서 오류\n먼저 꺼내야 할 배치:\n${expectedNext.batch_code}\n(${Math.floor((new Date() - new Date(expectedNext.processed_date)) / 86400000)}일 경과)`,
+        expected: expectedNext,
+        scanned: scannedBatch,
+      })
+      return
+    }
+
+    // 얼마나 할당할지 계산
+    const remaining = progress.needed - progress.scanned
+    const allocated = Math.min(remaining, scannedBatch.remaining_weight_kg)
+
+    // 스캔 목록에 추가
+    const updatedItems = items.map((item, idx) => {
+      if (idx !== currentItemIdx) return item
+      return {
+        ...item,
+        scanned: [...item.scanned, { ...scannedBatch, allocated }],
+      }
+    })
+    onUpdate({ ...target, items: updatedItems })
+
+    const newProgress = allocated + progress.scanned
+    const isDone = newProgress >= progress.needed - 0.001
+
+    setScanResult({
+      ok: true, type: 'success',
+      message: `✓ ${scannedBatch.batch_code}\n${allocated}kg 확인됨${isDone ? '\n이 품목 완료!' : `\n${(progress.needed - newProgress).toFixed(1)}kg 더 필요`}`,
+    })
+
+    // 완료되면 다음 품목으로
+    if (isDone && currentItemIdx < items.length - 1) {
+      setTimeout(() => {
+        setCurrentItemIdx(i => i + 1)
+        setScanResult(null)
+      }, 1200)
+    }
+  }
+
+  function handleSkip() {
+    if (!confirm('바코드 스캔을 건너뛰고 출고 처리하시겠습니까?\nFIFO 순서는 시스템이 자동으로 적용합니다.')) return
+    onComplete(true)
+  }
+
+  return (
+    <div className="page">
+      <div className="top-bar">
+        <div>
+          <h1>출고 처리</h1>
+          <div className="sub">{order.branch_name} · {order.order_number}</div>
+        </div>
+        <button className="btn" style={{ fontSize: '12px', padding: '6px 12px' }} onClick={onCancel}>
+          취소
+        </button>
+      </div>
+
+      {/* 전체 진행 현황 */}
+      <div className="card" style={{ marginBottom: '14px' }}>
+        <div style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: '8px' }}>품목별 스캔 현황</div>
+        {items.map((item, idx) => {
+          const p = getItemProgress(item)
+          return (
+            <div key={item.id} style={{
+              display: 'flex', alignItems: 'center', gap: '10px',
+              padding: '6px 0',
+              borderBottom: idx < items.length - 1 ? '0.5px solid var(--border)' : 'none',
+              opacity: idx < currentItemIdx ? 0.5 : 1,
+            }}>
+              {/* 상태 아이콘 */}
+              <div style={{
+                width: '20px', height: '20px', borderRadius: '50%', flexShrink: 0,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: '11px', fontWeight: 600,
+                background: p.done ? 'var(--green-bg)' : idx === currentItemIdx ? 'var(--blue-bg)' : 'var(--bg3)',
+                color: p.done ? 'var(--green-tx)' : idx === currentItemIdx ? 'var(--blue-tx)' : 'var(--text3)',
+              }}>
+                {p.done ? '✓' : idx + 1}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: '13px', fontWeight: idx === currentItemIdx ? 600 : 400 }}>
+                  {item.products?.name}
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>
+                  {p.scanned.toFixed(1)} / {p.needed}{item.products?.unit}
+                </div>
+              </div>
+              {/* 진행 바 */}
+              <div style={{ width: '60px', height: '4px', background: 'var(--bg3)', borderRadius: '2px', overflow: 'hidden' }}>
+                <div style={{
+                  width: `${Math.min(p.scanned / p.needed * 100, 100)}%`,
+                  height: '100%', borderRadius: '2px',
+                  background: p.done ? 'var(--green)' : 'var(--blue)',
+                  transition: 'width .3s',
+                }} />
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* 현재 품목 스캔 영역 */}
+      {!allDone && (
+        <div className="card" style={{ marginBottom: '14px' }}>
+          <div style={{ marginBottom: '12px' }}>
+            <div style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '3px' }}>지금 스캔할 품목</div>
+            <div style={{ fontSize: '17px', fontWeight: 700 }}>{currentItem.products?.name}</div>
+            <div style={{ fontSize: '13px', color: 'var(--text2)', marginTop: '2px' }}>
+              {progress.scanned.toFixed(1)} / {progress.needed}{currentItem.products?.unit} 확인됨
+            </div>
+          </div>
+
+          {/* FIFO 우선순위 안내 */}
+          {currentItem.batches.length > 0 && (
+            <div className="alert alert-info" style={{ marginBottom: '12px', fontSize: '12px' }}>
+              다음 꺼내야 할 배치: <strong>
+                {currentItem.batches.find(b => !currentItem.scanned.find(s => s.id === b.id))?.batch_code}
+              </strong>
+            </div>
+          )}
+
+          {/* 스캔 결과 */}
+          {scanResult && (
+            <div className={`alert ${
+              scanResult.type === 'success' ? 'alert-success' :
+              scanResult.type === 'fifo'    ? 'alert-danger'  :
+              scanResult.type === 'warning' ? 'alert-warning' : 'alert-danger'
+            }`} style={{ marginBottom: '12px', fontSize: '13px', whiteSpace: 'pre-line' }}>
+              {scanResult.message}
+            </div>
+          )}
+
+          {/* 스캐너 */}
+          {scanning ? (
+            <BarcodeScanner onScan={handleScan} onClose={() => setScanning(false)} />
+          ) : (
+            <button className="btn btn-primary btn-full" style={{ fontSize: '15px', height: '46px' }}
+              onClick={() => { setScanResult(null); setScanning(true) }}>
+              바코드 스캔
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 스캔 완료된 배치 목록 */}
+      {currentItem.scanned.length > 0 && (
+        <>
+          <div className="section-label">스캔 완료</div>
+          {currentItem.scanned.map((b, i) => (
+            <div key={i} className="card" style={{ marginBottom: '6px' }}>
+              <div className="card-row">
+                <span style={{ fontSize: '13px', fontWeight: 500 }}>{b.batch_code}</span>
+                <span style={{ fontSize: '13px', color: 'var(--green-tx)', fontWeight: 600 }}>
+                  {b.allocated}kg ✓
+                </span>
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
+      {/* 출고완료 버튼 */}
+      <div style={{ marginTop: '20px', display: 'flex', gap: '8px' }}>
+        <button
+          className="btn btn-ship btn-full"
+          style={{ height: '50px', fontSize: '15px', fontWeight: 600, opacity: allDone ? 1 : 0.4 }}
+          disabled={!allDone}
+          onClick={() => setConfirming(true)}
+        >
+          {allDone ? '출고 완료 처리' : `스캔 대기 중 (${items.filter(i => getItemProgress(i).done).length}/${items.length})`}
+        </button>
+        <button
+          className="btn"
+          style={{ flexShrink: 0, fontSize: '13px', padding: '0 14px', color: 'var(--text3)' }}
+          onClick={handleSkip}
+        >
+          건너뛰기
+        </button>
+      </div>
+
+      {/* 최종 확인 바텀시트 */}
+      {confirming && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 200,
+          background: 'rgba(0,0,0,0.35)',
+          display: 'flex', alignItems: 'flex-end',
+        }}
+          onClick={e => { if (e.target === e.currentTarget) setConfirming(false) }}
+        >
+          <div style={{
+            width: '100%', maxWidth: '480px', margin: '0 auto',
+            background: 'var(--bg)', borderRadius: '16px 16px 0 0',
+            padding: '20px 16px 32px',
+          }}>
+            <div style={{ width: '36px', height: '4px', background: 'var(--border2)', borderRadius: '2px', margin: '0 auto 16px' }} />
+            <div style={{ fontSize: '16px', fontWeight: 600, marginBottom: '8px' }}>출고 확인</div>
+            <div style={{ fontSize: '13px', color: 'var(--text2)', marginBottom: '16px' }}>
+              {order.branch_name} · {order.order_number}
+            </div>
+            {items.map(item => {
+              const p = getItemProgress(item)
+              return (
+                <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: '13px', borderBottom: '0.5px solid var(--border)' }}>
+                  <span>{item.products?.name}</span>
+                  <span style={{ fontWeight: 600 }}>{p.scanned.toFixed(1)}{item.products?.unit}</span>
+                </div>
+              )
+            })}
+            <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+              <button className="btn btn-ship btn-full" style={{ height: '46px', fontSize: '15px' }}
+                onClick={() => { setConfirming(false); onComplete(false) }}>
+                출고 완료
+              </button>
+              <button className="btn btn-full" onClick={() => setConfirming(false)}>취소</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

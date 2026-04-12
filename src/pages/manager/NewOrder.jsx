@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from '../../contexts/AuthContext'
 import { supabase } from '../../supabaseClient'
 import { notifyRole } from '../../utils/notifications'
-
-const ORDER_DAYS = [0, 2, 4] // 일, 화, 목
+import { notifyNewOrder } from '../../utils/sendPush'
 
 export default function ManagerNewOrder() {
   const { profile, branchId, branchName } = useAuth()
@@ -12,13 +11,6 @@ export default function ManagerNewOrder() {
   const [memo, setMemo]         = useState('')
   const [saving, setSaving]     = useState(false)
   const [done, setDone]         = useState(null)
-
-  const today     = new Date()
-  const dayOfWeek = today.getDay()
-  const canOrder  = ORDER_DAYS.includes(dayOfWeek)
-  const dayNames  = ['일', '월', '화', '수', '목', '금', '토']
-  const nextDay   = ORDER_DAYS.find(d => d > dayOfWeek) ?? ORDER_DAYS[0]
-  const nextDayName = dayNames[nextDay]
 
   useEffect(() => {
     supabase.from('products').select('id, name, unit').eq('is_active', true)
@@ -43,11 +35,10 @@ export default function ManagerNewOrder() {
     if (!validItems.length) return alert('품목과 수량을 입력하세요')
     setSaving(true)
 
-    // 주문 생성
     const { data: order, error } = await supabase
       .from('orders')
       .insert({
-        order_number: '',  // 트리거 자동채번
+        order_number: '',
         branch_id:    branchId,
         requested_by: profile.id,
         memo:         memo || null,
@@ -58,7 +49,6 @@ export default function ManagerNewOrder() {
 
     if (error) { alert('주문 실패: ' + error.message); setSaving(false); return }
 
-    // 주문 품목 생성
     await supabase.from('order_items').insert(
       validItems.map(item => ({
         order_id:      order.id,
@@ -67,13 +57,14 @@ export default function ManagerNewOrder() {
       }))
     )
 
-    // 사장에게 알림
     await notifyRole('owner', {
       type:   'new_order',
       title:  `${branchName} 주문 요청`,
       body:   `${validItems.length}품목 주문이 접수됐습니다`,
       ref_id: order.id,
     })
+    // 웹 푸시 발송
+    await notifyNewOrder(branchName, order.order_number)
 
     setDone(order.order_number)
     setSaving(false)
@@ -81,7 +72,6 @@ export default function ManagerNewOrder() {
     setMemo('')
   }
 
-  // 발주 완료 화면
   if (done) {
     return (
       <div className="page">
@@ -113,21 +103,8 @@ export default function ManagerNewOrder() {
         </div>
       </div>
 
-      {/* 발주 가능 여부 */}
-      {canOrder ? (
-        <div className="alert alert-success">
-          오늘({dayNames[dayOfWeek]}) 발주 가능합니다
-        </div>
-      ) : (
-        <div className="alert alert-warning">
-          발주 가능 요일: 일·화·목 &nbsp;|&nbsp; 다음 발주일: {nextDayName}요일
-        </div>
-      )}
-
       <div className="card">
         <form onSubmit={handleSubmit}>
-
-          {/* 품목 행들 */}
           {items.map((item, idx) => {
             const selected = products.find(p => p.id === item.product_id)
             return (
@@ -205,17 +182,11 @@ export default function ManagerNewOrder() {
           <button
             type="submit"
             className="btn btn-primary btn-full"
-            disabled={saving || !canOrder}
+            disabled={saving}
             style={{ height: '46px', fontSize: '15px' }}
           >
             {saving ? '요청 중...' : '주문 요청'}
           </button>
-
-          {!canOrder && (
-            <p style={{ fontSize: '12px', color: 'var(--text3)', textAlign: 'center', marginTop: '8px' }}>
-              발주 불가일 — {nextDayName}요일에 주문해주세요
-            </p>
-          )}
         </form>
       </div>
     </div>

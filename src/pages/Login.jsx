@@ -18,36 +18,25 @@ export default function Login() {
   }
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: '24px',
-      background: 'var(--bg2)',
-    }}>
-      {/* 로고 */}
-      <div style={{ marginBottom: '32px', textAlign: 'center' }}>
-        <div style={{
-          width: '56px', height: '56px', background: 'var(--text)',
-          borderRadius: '14px', display: 'flex', alignItems: 'center',
-          justifyContent: 'center', margin: '0 auto 12px',
-        }}>
-          <span style={{ fontSize: '28px', color: '#fff' }}>겹</span>
+    <div className="login-screen">
+      <div style={{ textAlign: 'center' }}>
+        <div className="login-logo-box">
+          <img src="/gyeopgyeopi-supply/logo.png" alt="겹겹" />
         </div>
-        <h1 style={{ fontSize: '22px', fontWeight: 700 }}>겹겹이 공급관리</h1>
-        <p style={{ fontSize: '13px', color: 'var(--text3)', marginTop: '4px' }}>본사 · 지점 통합 식재료 관리 시스템</p>
+        <p className="login-tagline">
+          가족처럼, 편안하게<br />
+          공급관리 시스템
+        </p>
       </div>
 
-      {/* 폼 */}
-      <div className="card" style={{ width: '100%', maxWidth: '360px' }}>
+      <div className="login-card">
+        {error && (
+          <div className="alert alert-danger" style={{ marginBottom: '16px' }}>
+            {error}
+          </div>
+        )}
+
         <form onSubmit={handleSubmit}>
-          {error && (
-            <div className="alert alert-danger" style={{ marginBottom: '14px' }}>
-              {error}
-            </div>
-          )}
           <div className="form-group">
             <label className="form-label">이메일</label>
             <input
@@ -76,7 +65,7 @@ export default function Login() {
             type="submit"
             className="btn btn-primary btn-full"
             disabled={loading}
-            style={{ height: '46px', fontSize: '15px' }}
+            style={{ height: '48px', fontSize: '15px' }}
           >
             {loading ? '로그인 중...' : '로그인'}
           </button>

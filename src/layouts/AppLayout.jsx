@@ -10,18 +10,19 @@ const NAV = {
     { path: '/owner/inventory',  label: '재고현황', icon: IconBox },
     { path: '/owner/stats',      label: '매입통계', icon: IconChart },
     { path: '/owner/settlement', label: '정산',     icon: IconReceipt },
+    { path: '/owner/settings',   label: '설정',     icon: IconSettings },
   ],
   manager: [
-    { path: '/manager/order-new',    label: '신규주문',    icon: IconPlus },
-    { path: '/manager/orders',       label: '내 주문',     icon: IconOrder },
-    { path: '/manager/branches',     label: '타지점현황',  icon: IconBranch },
-    { path: '/manager/settlement',   label: '정산내역',    icon: IconReceipt },
+    { path: '/manager/order-new',  label: '신규주문',   icon: IconPlus },
+    { path: '/manager/orders',     label: '내 주문',    icon: IconOrder },
+    { path: '/manager/branches',   label: '타지점현황', icon: IconBranch },
+    { path: '/manager/settlement', label: '정산내역',   icon: IconReceipt },
   ],
   staff: [
-    { path: '/staff/orders',         label: '주문출고',    icon: IconOrder, badge: true },
-    { path: '/staff/receive1',       label: '매입등록',    icon: IconInbox },
-    { path: '/staff/receive2',       label: '가공완료',    icon: IconTag },
-    { path: '/staff/inventory',      label: '재고확인',    icon: IconBox },
+    { path: '/staff/orders',    label: '주문출고', icon: IconOrder, badge: true },
+    { path: '/staff/receive1',  label: '매입등록', icon: IconInbox },
+    { path: '/staff/receive2',  label: '가공완료', icon: IconTag },
+    { path: '/staff/inventory', label: '재고확인', icon: IconBox },
   ],
 }
 
@@ -29,14 +30,11 @@ export default function AppLayout({ children }) {
   const { profile, role, signOut } = useAuth()
   const navigate  = useNavigate()
   const location  = useLocation()
-  const [unread, setUnread] = useState(0)
   const [pendingOrders, setPendingOrders] = useState(0)
 
   useEffect(() => {
     if (!profile) return
     fetchCounts()
-
-    // 실시간 알림 구독
     const ch = supabase
       .channel('notifications')
       .on('postgres_changes',
@@ -44,42 +42,49 @@ export default function AppLayout({ children }) {
         () => fetchCounts()
       )
       .subscribe()
-
     return () => supabase.removeChannel(ch)
   }, [profile])
 
   async function fetchCounts() {
-    const { count } = await supabase
-      .from('notifications')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', profile.id)
-      .eq('is_read', false)
-    setUnread(count ?? 0)
-
     if (role === 'owner') {
-      const { count: pc } = await supabase
-        .from('orders')
-        .select('id', { count: 'exact', head: true })
-        .eq('status', 'pending')
-      setPendingOrders(pc ?? 0)
+      const { count } = await supabase
+        .from('orders').select('id', { count: 'exact', head: true }).eq('status', 'pending')
+      setPendingOrders(count ?? 0)
     }
     if (role === 'staff') {
-      const { count: pc } = await supabase
-        .from('orders')
-        .select('id', { count: 'exact', head: true })
-        .eq('status', 'approved')
-      setPendingOrders(pc ?? 0)
+      const { count } = await supabase
+        .from('orders').select('id', { count: 'exact', head: true }).eq('status', 'approved')
+      setPendingOrders(count ?? 0)
     }
+  }
+
+  async function handleSignOut() {
+    if (confirm('로그아웃 하시겠습니까?')) await signOut()
   }
 
   const navItems = NAV[role] ?? []
 
   return (
     <div className="app-shell">
-      {/* 상단 영역: 페이지가 자체 top-bar를 가지면 여기선 렌더 안함 */}
+      {/* 유저바 */}
+      <div className="user-bar">
+        <div className="user-bar-name">
+          <span>{profile?.name}</span>
+          {profile?.branches?.name && (
+            <span className="user-bar-branch">{profile.branches.name}</span>
+          )}
+        </div>
+        <button className="user-bar-logout" onClick={handleSignOut}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>
+          </svg>
+          로그아웃
+        </button>
+      </div>
+
       <main>{children}</main>
 
-      {/* 하단 네비게이션 */}
+      {/* 하단 네비 */}
       <nav className="bottom-nav">
         {navItems.map(item => {
           const isActive = location.pathname === item.path ||
@@ -102,7 +107,6 @@ export default function AppLayout({ children }) {
   )
 }
 
-// ── SVG 아이콘들 ──────────────────────────────────────────
 function IconHome() {
   return <svg viewBox="0 0 24 24"><path d="M3 12L12 3l9 9M5 10v9a1 1 0 001 1h4v-5h4v5h4a1 1 0 001-1v-9" strokeLinecap="round" strokeLinejoin="round"/></svg>
 }
@@ -129,4 +133,7 @@ function IconInbox() {
 }
 function IconTag() {
   return <svg viewBox="0 0 24 24"><path d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A2 2 0 013 12V7a4 4 0 014-4z" strokeLinecap="round" strokeLinejoin="round"/></svg>
+}
+function IconSettings() {
+  return <svg viewBox="0 0 24 24"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" strokeLinecap="round" strokeLinejoin="round"/><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" strokeLinecap="round" strokeLinejoin="round"/></svg>
 }

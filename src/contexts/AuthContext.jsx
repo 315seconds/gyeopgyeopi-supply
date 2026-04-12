@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState } from 'react'
 import { supabase } from '../supabaseClient'
+import { registerPush } from '../utils/pushNotification'
 
 const AuthContext = createContext(null)
 
@@ -31,6 +32,8 @@ export function AuthProvider({ children }) {
       .single()
     setProfile(data)
     setLoading(false)
+    // 로그인 시 푸시 알림 자동 등록 (백그라운드)
+    if (data) registerPush(uid).catch(() => {})
   }
 
   async function signIn(email, password) {

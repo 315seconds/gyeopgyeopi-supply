@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAuth } from '../../contexts/AuthContext'
 import { supabase } from '../../supabaseClient'
 import { notifyRole, notifyBranchManager } from '../../utils/notifications'
+import { notifyOrderApproved } from '../../utils/sendPush'
 
 const STATUS_FILTER = ['all', 'pending', 'approved', 'shipped']
 const STATUS_LABEL  = { all: '전체', pending: '미승인', approved: '승인됨', shipped: '출고완료' }
@@ -42,6 +43,8 @@ export default function OwnerOrders() {
     await notifyBranchManager(branchId, {
       type: 'approved', title: '주문이 승인됐습니다', body: '물건을 준비하고 있습니다', ref_id: orderId,
     })
+    // 웹 푸시 발송
+    await notifyOrderApproved(branchId, orders.find(o=>o.id===orderId)?.branch_name ?? '', orderId)
     fetchOrders()
   }
 
@@ -68,9 +71,9 @@ export default function OwnerOrders() {
             className="btn"
             style={{
               padding: '6px 14px', fontSize: '13px', whiteSpace: 'nowrap',
-              background: filter === s ? 'var(--text)' : '',
-              color: filter === s ? 'var(--bg)' : '',
-              borderColor: filter === s ? 'var(--text)' : '',
+              background: filter === s ? 'var(--burgundy)' : '',
+              color: filter === s ? 'var(--cream-2)' : '',
+              borderColor: filter === s ? 'var(--burgundy-dark)' : '',
             }}
             onClick={() => setFilter(s)}
           >
