@@ -43,8 +43,8 @@
 
   /* 배경 별칭 (--bg, --bg2, --bg3, --border2) */
   --bg:      var(--cream);
-  --bg2:     var(--cream-2);
-  --bg3:     var(--cream-3);
+  --bg2:     var(--cream-3);
+  --bg3:     var(--cream-border);
   --border2: var(--cream-border);
 
   /* 레이아웃 */
