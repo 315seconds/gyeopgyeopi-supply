@@ -1,15 +1,15 @@
 // Supabase Edge Function — 웹 푸시 발송
 // 배포: supabase functions deploy send-push
+// 필요 시크릿: VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-const SUPABASE_URL      = Deno.env.get('SUPABASE_URL')!
-const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!
-const VAPID_PUBLIC_KEY  = Deno.env.get('VAPID_PUBLIC_KEY')!
-const VAPID_PRIVATE_KEY = Deno.env.get('VAPID_PRIVATE_KEY')!
-const VAPID_SUBJECT     = 'mailto:admin@gyeobgyeob.com'
+const SUPABASE_URL         = Deno.env.get('SUPABASE_URL')!
+const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!  // anon 대신 service role
+const VAPID_PUBLIC_KEY     = Deno.env.get('VAPID_PUBLIC_KEY')!
+const VAPID_PRIVATE_KEY    = Deno.env.get('VAPID_PRIVATE_KEY')!
+const VAPID_SUBJECT        = 'mailto:admin@gyeobgyeob.com'
 
-// web-push 라이브러리 (Deno용)
 import webpush from 'https://esm.sh/web-push@3.6.7'
 
 Deno.serve(async (req) => {
@@ -29,7 +29,8 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'user_ids 필수' }), { status: 400 })
     }
 
-    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    // service_role key로 RLS 우회 — 모든 유저의 구독 정보 조회 가능
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
     // 해당 유저들의 구독 정보 조회
     const { data: subs } = await supabase

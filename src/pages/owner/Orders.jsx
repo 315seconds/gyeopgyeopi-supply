@@ -109,7 +109,7 @@ function OrderCard({ order, expanded, onToggle, onApprove, onCancel }) {
     if (items.length) return
     const { data } = await supabase
       .from('order_items')
-      .select('*, products(name, unit)')
+      .select('*, products(name, unit, order_unit)')
       .eq('order_id', order.id)
     setItems(data ?? [])
   }
@@ -146,15 +146,23 @@ function OrderCard({ order, expanded, onToggle, onApprove, onCancel }) {
       {expanded && (
         <>
           <div className="divider" />
-          {items.map(item => (
-            <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '13px' }}>
-              <span>{item.products?.name}</span>
-              <span style={{ fontWeight: 500 }}>
-                {item.actual_qty ?? item.requested_qty}{item.products?.unit}
-                {item.charged_price ? ` · ${item.charged_price.toLocaleString()}원/${item.products?.unit}` : ''}
-              </span>
-            </div>
-          ))}
+          {items.map(item => {
+            const orderUnit = item.products?.order_unit ?? item.products?.unit
+            return (
+              <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '13px' }}>
+                <span>{item.products?.name}</span>
+                <div style={{ textAlign: 'right' }}>
+                  <span style={{ fontWeight: 500 }}>{item.requested_qty}{orderUnit}</span>
+                  {item.actual_weight_kg != null && (
+                    <span style={{ fontSize: '11px', color: 'var(--text3)', marginLeft: '6px' }}>
+                      ({item.actual_weight_kg}{item.products?.unit}
+                      {item.charged_price ? ` · ${item.charged_price.toLocaleString()}원/${item.products?.unit}` : ''})
+                    </span>
+                  )}
+                </div>
+              </div>
+            )
+          })}
 
           {order.status === 'pending' && (
             <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>

@@ -13,7 +13,9 @@ export default function ManagerNewOrder() {
   const [done, setDone]         = useState(null)
 
   useEffect(() => {
-    supabase.from('products').select('id, name, unit').eq('is_active', true)
+    supabase.from('products')
+      .select('id, name, unit, order_unit, approx_kg_per_unit')
+      .eq('is_active', true)
       .then(({ data }) => setProducts(data ?? []))
   }, [])
 
@@ -38,7 +40,7 @@ export default function ManagerNewOrder() {
     const { data: order, error } = await supabase
       .from('orders')
       .insert({
-        order_number: '',
+        order_number: null,  // 트리거 자동 채번
         branch_id:    branchId,
         requested_by: profile.id,
         memo:         memo || null,
@@ -71,7 +73,6 @@ export default function ManagerNewOrder() {
       body:   `${validItems.length}품목 주문이 접수됐습니다`,
       ref_id: order.id,
     })
-    // 웹 푸시 발송
     await notifyNewOrder(branchName, orderNumber)
 
     setDone(orderNumber)
@@ -115,6 +116,10 @@ export default function ManagerNewOrder() {
         <form onSubmit={handleSubmit}>
           {items.map((item, idx) => {
             const selected = products.find(p => p.id === item.product_id)
+            const orderUnit = selected?.order_unit ?? selected?.unit ?? 'kg'
+            const approxKg  = selected?.approx_kg_per_unit
+            const qty        = parseFloat(item.qty)
+
             return (
               <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1fr 90px 36px', gap: '8px', marginBottom: '10px', alignItems: 'end' }}>
                 <div>
@@ -131,23 +136,31 @@ export default function ManagerNewOrder() {
                     ))}
                   </select>
                 </div>
+
                 <div>
                   {idx === 0 && (
                     <label className="form-label">
-                      수량 {selected ? `(${selected.unit})` : ''}
+                      수량 ({orderUnit})
                     </label>
                   )}
                   <input
                     className="form-input"
                     type="number"
-                    step="0.1"
+                    step={orderUnit === 'kg' ? '0.1' : '1'}
                     min="0"
                     placeholder="0"
                     value={item.qty}
                     onChange={e => updateItem(idx, 'qty', e.target.value)}
                     required
                   />
+                  {/* 개 단위: 예상 kg 표시 */}
+                  {orderUnit !== 'kg' && approxKg && qty > 0 && (
+                    <div style={{ fontSize: '10px', color: 'var(--text3)', marginTop: '2px', textAlign: 'center' }}>
+                      ≈ {(qty * approxKg).toFixed(1)}kg
+                    </div>
+                  )}
                 </div>
+
                 <button
                   type="button"
                   onClick={() => removeItem(idx)}

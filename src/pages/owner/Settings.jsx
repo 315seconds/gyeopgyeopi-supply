@@ -1,18 +1,21 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../../supabaseClient'
 
+const BRAND_LABEL = { gyeobgyeob: '겹겹', jeokdon: '적돈' }
+const ORDER_UNITS = ['kg', '개', '박스', '봉', '병', 'g']
+
 export default function Settings() {
-  const [tab, setTab] = useState('suppliers') // 'suppliers' | 'products'
+  const [tab, setTab] = useState('suppliers')
 
   return (
     <div className="page">
       <div className="top-bar"><h1>설정</h1></div>
 
-      {/* 탭 */}
-      <div style={{ display: 'flex', gap: '6px', marginBottom: '18px' }}>
+      <div style={{ display: 'flex', gap: '6px', marginBottom: '18px', flexWrap: 'wrap' }}>
         {[
           { key: 'suppliers', label: '거래처 관리' },
           { key: 'products',  label: '상품 관리' },
+          { key: 'branches',  label: '지점 관리' },
         ].map(t => (
           <button
             key={t.key}
@@ -30,8 +33,75 @@ export default function Settings() {
         ))}
       </div>
 
-      {tab === 'suppliers' ? <SuppliersPanel /> : <ProductsPanel />}
+      {tab === 'suppliers' && <SuppliersPanel />}
+      {tab === 'products'  && <ProductsPanel />}
+      {tab === 'branches'  && <BranchesPanel />}
     </div>
+  )
+}
+
+/* ── 지점 관리 ──────────────────────────────────────────── */
+function BranchesPanel() {
+  const [list, setList]       = useState([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving]   = useState(null)
+
+  useEffect(() => { fetchList() }, [])
+
+  async function fetchList() {
+    setLoading(true)
+    const { data } = await supabase.from('branches').select('*').order('name')
+    setList(data ?? [])
+    setLoading(false)
+  }
+
+  async function setBrand(branchId, brand) {
+    setSaving(branchId)
+    const { error } = await supabase.from('branches').update({ brand }).eq('id', branchId)
+    if (error) { alert('저장 실패: ' + error.message) }
+    setSaving(null)
+    fetchList()
+  }
+
+  if (loading) return <div className="loading">로딩 중...</div>
+
+  return (
+    <>
+      <div className="alert alert-info">
+        지점별 브랜드를 설정하면 해당 브랜드의 재고만 출고에 사용됩니다.<br />
+        겹겹: 건조 숙성 재고 / 적돈: 즉시 출고 재고
+      </div>
+
+      {list.map(branch => (
+        <div key={branch.id} className="card" style={{ marginBottom: '10px' }}>
+          <div className="card-row" style={{ marginBottom: '10px' }}>
+            <span style={{ fontSize: '15px', fontWeight: 600 }}>{branch.name}</span>
+            <span style={{ fontSize: '12px', color: 'var(--text3)' }}>
+              현재: {BRAND_LABEL[branch.brand] ?? branch.brand ?? '-'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {['gyeobgyeob', 'jeokdon'].map(b => (
+              <button
+                key={b}
+                className="btn btn-full"
+                style={{
+                  fontSize: '13px', padding: '9px',
+                  background:   branch.brand === b ? 'var(--burgundy)' : '',
+                  color:        branch.brand === b ? 'var(--cream-2)'  : '',
+                  borderColor:  branch.brand === b ? 'var(--burgundy-dark)' : '',
+                  opacity:      saving === branch.id ? 0.6 : 1,
+                }}
+                disabled={saving === branch.id}
+                onClick={() => setBrand(branch.id, b)}
+              >
+                {BRAND_LABEL[b]}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </>
   )
 }
 
@@ -39,7 +109,7 @@ export default function Settings() {
 function SuppliersPanel() {
   const [list, setList]       = useState([])
   const [loading, setLoading] = useState(true)
-  const [editing, setEditing] = useState(null)  // null | 'new' | {id,...}
+  const [editing, setEditing] = useState(null)
 
   useEffect(() => { fetchList() }, [])
 
@@ -56,14 +126,12 @@ function SuppliersPanel() {
 
   async function save(form) {
     if (form.id) {
-      // 수정
       const { error } = await supabase
         .from('suppliers')
         .update({ name: form.name, category: form.category, contact: form.contact || null, memo: form.memo || null })
         .eq('id', form.id)
       if (error) { alert('저장 실패: ' + error.message); return }
     } else {
-      // 신규
       const { error } = await supabase
         .from('suppliers')
         .insert({ name: form.name, category: form.category, contact: form.contact || null, memo: form.memo || null })
@@ -75,8 +143,7 @@ function SuppliersPanel() {
 
   async function toggleActive(item) {
     const next = !item.is_active
-    const label = next ? '활성화' : '비활성화'
-    if (!confirm(`${item.name}을 ${label}하시겠습니까?`)) return
+    if (!confirm(`${item.name}을 ${next ? '활성화' : '비활성화'}하시겠습니까?`)) return
     await supabase.from('suppliers').update({ is_active: next }).eq('id', item.id)
     fetchList()
   }
@@ -265,6 +332,10 @@ function ProductsPanel() {
       name:                form.name,
       category:            form.category,
       unit:                form.unit,
+      order_unit:          form.order_unit,
+      approx_kg_per_unit:  form.order_unit !== 'kg' && form.approx_kg_per_unit
+                             ? parseFloat(form.approx_kg_per_unit)
+                             : null,
       margin_rate:         parseFloat(form.margin_rate) / 100 || null,
       requires_processing: form.requires_processing,
     }
@@ -362,13 +433,15 @@ function ProductsPanel() {
 
 function ProductCard({ item, onEdit, onToggle, onDelete }) {
   const [open, setOpen] = useState(false)
-  const marginPct = item.margin_rate ? Math.round(item.margin_rate * 100) : null
+  const marginPct  = item.margin_rate ? Math.round(item.margin_rate * 100) : null
+  const orderUnit  = item.order_unit ?? item.unit
+  const showApprox = orderUnit !== 'kg' && item.approx_kg_per_unit
 
   return (
     <div className="card" style={{ marginBottom: '8px', opacity: item.is_active ? 1 : 0.5 }}>
       <div className="card-row" style={{ cursor: 'pointer' }} onClick={() => setOpen(o => !o)}>
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '7px', flexWrap: 'wrap' }}>
             <span style={{ fontSize: '14px', fontWeight: 500 }}>{item.name}</span>
             {marginPct && (
               <span className="badge badge-warning">마진 {marginPct}%</span>
@@ -378,7 +451,9 @@ function ProductCard({ item, onEdit, onToggle, onDelete }) {
             )}
           </div>
           <div style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '3px' }}>
-            단위: {item.unit}
+            재고단위 {item.unit}
+            {orderUnit !== item.unit && ` · 주문단위 ${orderUnit}`}
+            {showApprox && ` · 1${orderUnit}≈${item.approx_kg_per_unit}kg`}
           </div>
         </div>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" strokeWidth="1.5"
@@ -412,6 +487,10 @@ function ProductForm({ initial, onSave, onCancel }) {
     name:                 initial?.name                 ?? '',
     category:             initial?.category             ?? 'meat',
     unit:                 initial?.unit                 ?? 'kg',
+    order_unit:           initial?.order_unit           ?? (initial?.unit ?? 'kg'),
+    approx_kg_per_unit:   initial?.approx_kg_per_unit != null
+                            ? String(initial.approx_kg_per_unit)
+                            : '',
     margin_rate:          initial?.margin_rate != null
                             ? Math.round(initial.margin_rate * 100).toString()
                             : '',
@@ -420,7 +499,8 @@ function ProductForm({ initial, onSave, onCancel }) {
 
   function set(k, v) { setForm(f => ({ ...f, [k]: v })) }
 
-  const isMeat = form.category === 'meat'
+  const isMeat          = form.category === 'meat'
+  const isNonKgOrder    = form.order_unit !== 'kg'
 
   return (
     <div className="card">
@@ -444,17 +524,49 @@ function ProductForm({ initial, onSave, onCancel }) {
           </select>
         </div>
         <div className="form-group" style={{ marginBottom: 0 }}>
-          <label className="form-label">단위</label>
+          <label className="form-label">재고 단위</label>
           <select className="form-input" value={form.unit}
             onChange={e => set('unit', e.target.value)}>
-            <option value="kg">kg</option>
-            <option value="g">g</option>
-            <option value="병">병</option>
-            <option value="개">개</option>
-            <option value="박스">박스</option>
-            <option value="봉">봉</option>
+            {ORDER_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
           </select>
         </div>
+      </div>
+
+      {/* 주문 단위 (점장이 주문 시 사용하는 단위) */}
+      <div style={{ marginTop: '14px' }}>
+        <div className="form-row">
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">
+              주문 단위
+              <span style={{ fontSize: '11px', fontWeight: 400, color: 'var(--text3)', marginLeft: '4px' }}>
+                점장 주문 시
+              </span>
+            </label>
+            <select className="form-input" value={form.order_unit}
+              onChange={e => set('order_unit', e.target.value)}>
+              {ORDER_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
+          {isNonKgOrder && (
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">
+                1{form.order_unit}당 kg
+                <span style={{ fontSize: '11px', fontWeight: 400, color: 'var(--text3)', marginLeft: '4px' }}>
+                  참고값
+                </span>
+              </label>
+              <input className="form-input" type="number" step="0.01" min="0"
+                value={form.approx_kg_per_unit}
+                onChange={e => set('approx_kg_per_unit', e.target.value)}
+                placeholder="예: 1.5" />
+            </div>
+          )}
+        </div>
+        {isNonKgOrder && (
+          <div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '4px' }}>
+            출고 시 스태프가 실제 무게를 직접 입력합니다
+          </div>
+        )}
       </div>
 
       {isMeat && (
@@ -479,7 +591,7 @@ function ProductForm({ initial, onSave, onCancel }) {
           style={{ width: '16px', height: '16px', accentColor: 'var(--burgundy)', cursor: 'pointer' }}
         />
         <label htmlFor="req-processing" style={{ fontSize: '13px', color: 'var(--text2)', cursor: 'pointer' }}>
-          숙성·트리밍 가공 필요 (고기류)
+          숙성·트리밍 가공 필요 (겹겹 브랜드용 고기류)
         </label>
       </div>
 

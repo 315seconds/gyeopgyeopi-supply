@@ -68,7 +68,7 @@ function OrderCard({ order, expanded, onToggle, onCancel }) {
     if (items.length) return
     const { data } = await supabase
       .from('order_items')
-      .select('*, products(name, unit)')
+      .select('*, products(name, unit, order_unit)')
       .eq('order_id', order.id)
     setItems(data ?? [])
   }
@@ -113,19 +113,19 @@ function OrderCard({ order, expanded, onToggle, onCancel }) {
               <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', fontSize: '13px', borderBottom: '0.5px solid var(--border)' }}>
                 <span>{item.products?.name}</span>
                 <div style={{ textAlign: 'right' }}>
+                  {/* 주문 수량 (order_unit 기준) */}
                   <span style={{ fontWeight: 500 }}>
-                    {item.actual_qty ?? item.requested_qty}{item.products?.unit}
+                    {item.requested_qty}{item.products?.order_unit ?? item.products?.unit}
                   </span>
+                  {/* 실제 출고 중량 (출고 후) */}
+                  {item.actual_weight_kg != null && (
+                    <div style={{ fontSize: '11px', color: 'var(--text3)' }}>
+                      실중량 {item.actual_weight_kg}{item.products?.unit}
+                    </div>
+                  )}
                   {item.charged_price && (
                     <div style={{ fontSize: '11px', color: 'var(--text3)' }}>
                       {item.charged_price.toLocaleString()}원/{item.products?.unit}
-                      {item.line_total && ` = ${Math.round(item.line_total).toLocaleString()}원`}
-                    </div>
-                  )}
-                  {/* 요청량과 실출고량 차이 표시 */}
-                  {item.actual_qty && item.actual_qty !== item.requested_qty && (
-                    <div style={{ fontSize: '11px', color: 'var(--amber-tx)' }}>
-                      요청 {item.requested_qty}{item.products?.unit}
                     </div>
                   )}
                 </div>
