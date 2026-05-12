@@ -13,7 +13,7 @@ export default function StaffOrders() {
   const [orders, setOrders]       = useState([])
   const [filter, setFilter]       = useState('approved')
   const [loading, setLoading]     = useState(true)
-  const [shipTarget, setShipTarget] = useState(null) // 출고 처리 중인 주문
+  const [shipTarget, setShipTarget] = useState(null)
 
   useEffect(() => { fetchOrders() }, [filter])
 
@@ -27,31 +27,51 @@ export default function StaffOrders() {
   }
 
   async function startShip(order) {
-    // 주문 품목 + FIFO 배치 목록 로드
+    // 지점의 브랜드 조회 (FIFO 재고 풀 구분)
+    const { data: branch } = await supabase
+      .from('branches').select('brand').eq('id', order.branch_id).single()
+    const brand = branch?.brand ?? 'gyeobgyeob'
+
     const { data: items } = await supabase
       .from('order_items')
-      .select('*, products(name, unit)')
+      .select('*, products(name, unit, order_unit, approx_kg_per_unit)')
       .eq('order_id', order.id)
 
-    // 각 품목의 FIFO 배치 목록 조회
     const itemsWithBatches = await Promise.all(items.map(async item => {
       const { data: batches } = await supabase
         .from('inventory_batches')
         .select('id, batch_code, barcode, remaining_weight_kg, sell_price, seq, processed_date')
         .eq('product_id', item.product_id)
         .eq('status', 'available')
+        .eq('brand', brand)
         .gt('remaining_weight_kg', 0)
         .order('seq', { ascending: true })
-      return { ...item, batches: batches ?? [], scanned: [] }
+
+      const orderUnit = item.products?.order_unit ?? item.products?.unit ?? 'kg'
+      // kg 단위 품목은 requested_qty를 그대로 실중량으로 사용
+      const prefilledWeight = orderUnit === 'kg' ? item.requested_qty : null
+
+      return { ...item, actual_weight_kg: prefilledWeight, batches: batches ?? [], scanned: [] }
     }))
 
-    setShipTarget({ order, items: itemsWithBatches, skipped: false })
+    setShipTarget({ order: { ...order, brand }, items: itemsWithBatches })
   }
 
   async function completeShip(skipped = false) {
     if (!shipTarget) return
 
-    const { shortages } = await shipOrder(shipTarget.order.id, profile.id)
+    // 스태프 입력 실중량 맵핑
+    const actualWeights = {}
+    shipTarget.items.forEach(item => {
+      if (item.actual_weight_kg > 0) actualWeights[item.id] = item.actual_weight_kg
+    })
+
+    const { shortages } = await shipOrder(
+      shipTarget.order.id,
+      profile.id,
+      shipTarget.order.brand ?? 'gyeobgyeob',
+      actualWeights,
+    )
 
     await notifyRole('owner', {
       type: 'shipped',
@@ -76,7 +96,7 @@ export default function StaffOrders() {
         )
       }
     }
-    // 출고완료 웹 푸시
+
     await notifyOrderShipped(
       shipTarget.order.branch_id,
       shipTarget.order.branch_name,
@@ -87,7 +107,6 @@ export default function StaffOrders() {
     fetchOrders()
   }
 
-  // 출고 처리 화면
   if (shipTarget) {
     return (
       <ShipProcess
@@ -146,7 +165,7 @@ function OrderCard({ order, onShip }) {
     if (!expanded && !items.length) {
       const { data } = await supabase
         .from('order_items')
-        .select('*, products(name, unit)')
+        .select('*, products(name, unit, order_unit)')
         .eq('order_id', order.id)
       setItems(data ?? [])
     }
@@ -173,12 +192,22 @@ function OrderCard({ order, onShip }) {
       {expanded && (
         <>
           <div className="divider" />
-          {items.map(item => (
-            <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '13px' }}>
-              <span>{item.products?.name}</span>
-              <span style={{ fontWeight: 500 }}>{item.requested_qty}{item.products?.unit}</span>
-            </div>
-          ))}
+          {items.map(item => {
+            const orderUnit = item.products?.order_unit ?? item.products?.unit ?? 'kg'
+            return (
+              <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '13px' }}>
+                <span>{item.products?.name}</span>
+                <div style={{ textAlign: 'right' }}>
+                  <span style={{ fontWeight: 500 }}>{item.requested_qty}{orderUnit}</span>
+                  {item.actual_weight_kg && (
+                    <span style={{ fontSize: '11px', color: 'var(--text3)', marginLeft: '6px' }}>
+                      ({item.actual_weight_kg}{item.products?.unit})
+                    </span>
+                  )}
+                </div>
+              </div>
+            )
+          })}
           {order.memo && (
             <div style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>메모: {order.memo}</div>
           )}
@@ -193,31 +222,44 @@ function OrderCard({ order, onShip }) {
   )
 }
 
-// ── 출고 처리 화면 (FIFO 스캔 검증) ──────────────────────────
+// ── 출고 처리 화면 ──────────────────────────────────────────
 function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
   const [currentItemIdx, setCurrentItemIdx] = useState(0)
   const [scanning, setScanning]             = useState(false)
-  const [scanResult, setScanResult]         = useState(null) // { ok, message, type }
+  const [scanResult, setScanResult]         = useState(null)
   const [confirming, setConfirming]         = useState(false)
 
   const { order, items } = target
   const currentItem = items[currentItemIdx]
 
-  // 각 품목의 스캔 진행 상태 계산
+  const orderUnit = currentItem.products?.order_unit ?? currentItem.products?.unit ?? 'kg'
+  const isKgUnit  = orderUnit === 'kg'
+
   function getItemProgress(item) {
-    const needed  = item.requested_qty
+    const needed  = item.actual_weight_kg ?? 0
     const scanned = item.scanned.reduce((s, b) => s + b.allocated, 0)
-    return { needed, scanned, done: scanned >= needed - 0.001 }
+    return { needed, scanned, done: needed > 0 && scanned >= needed - 0.001 }
   }
 
-  const allDone = items.every(item => getItemProgress(item).done)
-  const progress = getItemProgress(currentItem)
+  // 스킵 가능 조건: 모든 품목의 actual_weight_kg가 입력됨
+  const allWeightsEntered = items.every(item => (item.actual_weight_kg ?? 0) > 0)
+  const allDone           = items.every(item => getItemProgress(item).done)
+  const progress          = getItemProgress(currentItem)
+
+  function updateActualWeight(idx, weightKg) {
+    const updatedItems = items.map((item, i) => {
+      if (i !== idx) return item
+      // 중량 변경 시 스캔 초기화
+      return { ...item, actual_weight_kg: weightKg > 0 ? weightKg : null, scanned: [] }
+    })
+    onUpdate({ ...target, items: updatedItems })
+    setScanResult(null)
+  }
 
   async function handleScan(code) {
     setScanning(false)
     setScanResult(null)
 
-    // 스캔한 바코드로 배치 찾기
     const { data: scannedBatch } = await supabase
       .from('inventory_batches')
       .select('id, batch_code, barcode, remaining_weight_kg, sell_price, seq, processed_date, product_id')
@@ -229,7 +271,6 @@ function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
       return
     }
 
-    // 현재 품목과 일치하는지 확인
     if (scannedBatch.product_id !== currentItem.product_id) {
       const { data: p } = await supabase.from('products').select('name').eq('id', scannedBatch.product_id).single()
       setScanResult({
@@ -239,13 +280,11 @@ function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
       return
     }
 
-    // 이미 스캔한 배치인지 확인
     if (currentItem.scanned.find(s => s.id === scannedBatch.id)) {
       setScanResult({ ok: false, type: 'warning', message: '이미 스캔한 배치입니다' })
       return
     }
 
-    // FIFO 순서 검증
     const expectedBatches = currentItem.batches.filter(b => !currentItem.scanned.find(s => s.id === b.id))
     const expectedNext    = expectedBatches[0]
 
@@ -259,29 +298,23 @@ function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
       return
     }
 
-    // 얼마나 할당할지 계산
-    const remaining = progress.needed - progress.scanned
-    const allocated = Math.min(remaining, scannedBatch.remaining_weight_kg)
+    const remaining  = progress.needed - progress.scanned
+    const allocated  = Math.min(remaining, scannedBatch.remaining_weight_kg)
 
-    // 스캔 목록에 추가
     const updatedItems = items.map((item, idx) => {
       if (idx !== currentItemIdx) return item
-      return {
-        ...item,
-        scanned: [...item.scanned, { ...scannedBatch, allocated }],
-      }
+      return { ...item, scanned: [...item.scanned, { ...scannedBatch, allocated }] }
     })
     onUpdate({ ...target, items: updatedItems })
 
-    const newProgress = allocated + progress.scanned
-    const isDone = newProgress >= progress.needed - 0.001
+    const newScanned = allocated + progress.scanned
+    const isDone     = newScanned >= progress.needed - 0.001
 
     setScanResult({
       ok: true, type: 'success',
-      message: `✓ ${scannedBatch.batch_code}\n${allocated}kg 확인됨${isDone ? '\n이 품목 완료!' : `\n${(progress.needed - newProgress).toFixed(1)}kg 더 필요`}`,
+      message: `✓ ${scannedBatch.batch_code}\n${allocated.toFixed(2)}kg 확인됨${isDone ? '\n이 품목 완료!' : `\n${(progress.needed - newScanned).toFixed(2)}kg 더 필요`}`,
     })
 
-    // 완료되면 다음 품목으로
     if (isDone && currentItemIdx < items.length - 1) {
       setTimeout(() => {
         setCurrentItemIdx(i => i + 1)
@@ -291,6 +324,10 @@ function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
   }
 
   function handleSkip() {
+    if (!allWeightsEntered) {
+      alert('모든 품목의 실제 중량을 먼저 입력해주세요.')
+      return
+    }
     if (!confirm('바코드 스캔을 건너뛰고 출고 처리하시겠습니까?\nFIFO 순서는 시스템이 자동으로 적용합니다.')) return
     onComplete(true)
   }
@@ -307,11 +344,13 @@ function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
         </button>
       </div>
 
-      {/* 전체 진행 현황 */}
+      {/* 전체 품목 현황 */}
       <div className="card" style={{ marginBottom: '14px' }}>
-        <div style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: '8px' }}>품목별 스캔 현황</div>
+        <div style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: '8px' }}>품목별 진행 현황</div>
         {items.map((item, idx) => {
-          const p = getItemProgress(item)
+          const p       = getItemProgress(item)
+          const iUnit   = item.products?.order_unit ?? item.products?.unit ?? 'kg'
+          const hasWt   = (item.actual_weight_kg ?? 0) > 0
           return (
             <div key={item.id} style={{
               display: 'flex', alignItems: 'center', gap: '10px',
@@ -319,13 +358,12 @@ function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
               borderBottom: idx < items.length - 1 ? '0.5px solid var(--border)' : 'none',
               opacity: idx < currentItemIdx ? 0.5 : 1,
             }}>
-              {/* 상태 아이콘 */}
               <div style={{
                 width: '20px', height: '20px', borderRadius: '50%', flexShrink: 0,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 fontSize: '11px', fontWeight: 600,
                 background: p.done ? 'var(--green-bg)' : idx === currentItemIdx ? 'var(--blue-bg)' : 'var(--bg3)',
-                color: p.done ? 'var(--green-tx)' : idx === currentItemIdx ? 'var(--blue-tx)' : 'var(--text3)',
+                color:      p.done ? 'var(--green-tx)' : idx === currentItemIdx ? 'var(--blue-tx)' : 'var(--text3)',
               }}>
                 {p.done ? '✓' : idx + 1}
               </div>
@@ -334,67 +372,107 @@ function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
                   {item.products?.name}
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>
-                  {p.scanned.toFixed(1)} / {p.needed}{item.products?.unit}
+                  주문 {item.requested_qty}{iUnit}
+                  {hasWt && ` · 실중량 ${item.actual_weight_kg}kg`}
+                  {p.done && ` · 스캔 ${p.scanned.toFixed(2)}kg`}
                 </div>
               </div>
               {/* 진행 바 */}
-              <div style={{ width: '60px', height: '4px', background: 'var(--bg3)', borderRadius: '2px', overflow: 'hidden' }}>
-                <div style={{
-                  width: `${Math.min(p.scanned / p.needed * 100, 100)}%`,
-                  height: '100%', borderRadius: '2px',
-                  background: p.done ? 'var(--green)' : 'var(--blue)',
-                  transition: 'width .3s',
-                }} />
-              </div>
+              {hasWt && (
+                <div style={{ width: '60px', height: '4px', background: 'var(--bg3)', borderRadius: '2px', overflow: 'hidden' }}>
+                  <div style={{
+                    width: `${Math.min(p.scanned / p.needed * 100, 100)}%`,
+                    height: '100%', borderRadius: '2px',
+                    background: p.done ? 'var(--green)' : 'var(--blue)',
+                    transition: 'width .3s',
+                  }} />
+                </div>
+              )}
             </div>
           )
         })}
       </div>
 
-      {/* 현재 품목 스캔 영역 */}
+      {/* 현재 품목 — 실중량 입력 + 스캔 */}
       {!allDone && (
         <div className="card" style={{ marginBottom: '14px' }}>
-          <div style={{ marginBottom: '12px' }}>
-            <div style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '3px' }}>지금 스캔할 품목</div>
+          <div style={{ marginBottom: '14px' }}>
+            <div style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '3px' }}>지금 처리할 품목</div>
             <div style={{ fontSize: '17px', fontWeight: 700 }}>{currentItem.products?.name}</div>
             <div style={{ fontSize: '13px', color: 'var(--text2)', marginTop: '2px' }}>
-              {progress.scanned.toFixed(1)} / {progress.needed}{currentItem.products?.unit} 확인됨
+              주문 {currentItem.requested_qty}{orderUnit}
+              {currentItem.products?.approx_kg_per_unit && !isKgUnit && (
+                <span style={{ color: 'var(--text3)', fontSize: '12px' }}>
+                  {' '}(≈ {(currentItem.requested_qty * currentItem.products.approx_kg_per_unit).toFixed(1)}kg 예상)
+                </span>
+              )}
             </div>
           </div>
 
-          {/* FIFO 우선순위 안내 */}
-          {currentItem.batches.length > 0 && (
-            <div className="alert alert-info" style={{ marginBottom: '12px', fontSize: '12px' }}>
-              다음 꺼내야 할 배치: <strong>
-                {currentItem.batches.find(b => !currentItem.scanned.find(s => s.id === b.id))?.batch_code}
-              </strong>
-            </div>
-          )}
+          {/* 실제 중량 입력 */}
+          <div className="form-group" style={{ marginBottom: '12px' }}>
+            <label className="form-label">
+              실제 출고 중량 (kg)
+              {isKgUnit && (
+                <span style={{ fontSize: '11px', color: 'var(--text3)', fontWeight: 400, marginLeft: '6px' }}>
+                  kg 단위 품목 — 필요 시 수정 가능
+                </span>
+              )}
+            </label>
+            <input
+              className="form-input"
+              type="number"
+              step="0.01"
+              min="0.01"
+              placeholder="저울로 측정한 실제 무게 (kg)"
+              value={currentItem.actual_weight_kg ?? ''}
+              onChange={e => updateActualWeight(currentItemIdx, parseFloat(e.target.value))}
+              style={{ fontSize: '16px' }}
+            />
+          </div>
 
-          {/* 스캔 결과 */}
-          {scanResult && (
-            <div className={`alert ${
-              scanResult.type === 'success' ? 'alert-success' :
-              scanResult.type === 'fifo'    ? 'alert-danger'  :
-              scanResult.type === 'warning' ? 'alert-warning' : 'alert-danger'
-            }`} style={{ marginBottom: '12px', fontSize: '13px', whiteSpace: 'pre-line' }}>
-              {scanResult.message}
-            </div>
-          )}
+          {/* 스캔 영역 — 실중량 입력 후 활성화 */}
+          {(currentItem.actual_weight_kg ?? 0) > 0 && (
+            <>
+              <div style={{ fontSize: '13px', color: 'var(--text2)', marginBottom: '10px' }}>
+                {progress.scanned.toFixed(2)} / {progress.needed}kg 스캔 확인됨
+              </div>
 
-          {/* 스캐너 */}
-          {scanning ? (
-            <BarcodeScanner onScan={handleScan} onClose={() => setScanning(false)} />
-          ) : (
-            <button className="btn btn-primary btn-full" style={{ fontSize: '15px', height: '46px' }}
-              onClick={() => { setScanResult(null); setScanning(true) }}>
-              바코드 스캔
-            </button>
+              {currentItem.batches.length > 0 && (
+                <div className="alert alert-info" style={{ marginBottom: '12px', fontSize: '12px' }}>
+                  다음 꺼내야 할 배치: <strong>
+                    {currentItem.batches.find(b => !currentItem.scanned.find(s => s.id === b.id))?.batch_code}
+                  </strong>
+                </div>
+              )}
+
+              {scanResult && (
+                <div className={`alert ${
+                  scanResult.type === 'success' ? 'alert-success' :
+                  scanResult.type === 'fifo'    ? 'alert-danger'  :
+                  scanResult.type === 'warning' ? 'alert-warning' : 'alert-danger'
+                }`} style={{ marginBottom: '12px', fontSize: '13px', whiteSpace: 'pre-line' }}>
+                  {scanResult.message}
+                </div>
+              )}
+
+              {scanning ? (
+                <BarcodeScanner onScan={handleScan} onClose={() => setScanning(false)} />
+              ) : (
+                <button
+                  className="btn btn-primary btn-full"
+                  style={{ fontSize: '15px', height: '46px' }}
+                  onClick={() => { setScanResult(null); setScanning(true) }}
+                >
+                  바코드 스캔
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
 
-      {/* 스캔 완료된 배치 목록 */}
+      {/* 스캔 완료 배치 목록 */}
       {currentItem.scanned.length > 0 && (
         <>
           <div className="section-label">스캔 완료</div>
@@ -403,7 +481,7 @@ function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
               <div className="card-row">
                 <span style={{ fontSize: '13px', fontWeight: 500 }}>{b.batch_code}</span>
                 <span style={{ fontSize: '13px', color: 'var(--green-tx)', fontWeight: 600 }}>
-                  {b.allocated}kg ✓
+                  {b.allocated.toFixed(2)}kg ✓
                 </span>
               </div>
             </div>
@@ -419,16 +497,28 @@ function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
           disabled={!allDone}
           onClick={() => setConfirming(true)}
         >
-          {allDone ? '출고 완료 처리' : `스캔 대기 중 (${items.filter(i => getItemProgress(i).done).length}/${items.length})`}
+          {allDone
+            ? '출고 완료 처리'
+            : `스캔 대기 중 (${items.filter(i => getItemProgress(i).done).length}/${items.length})`}
         </button>
         <button
           className="btn"
-          style={{ flexShrink: 0, fontSize: '13px', padding: '0 14px', color: 'var(--text3)' }}
+          style={{
+            flexShrink: 0, fontSize: '13px', padding: '0 14px',
+            color:    allWeightsEntered ? 'var(--text2)' : 'var(--text3)',
+            opacity:  allWeightsEntered ? 1 : 0.5,
+          }}
           onClick={handleSkip}
         >
           건너뛰기
         </button>
       </div>
+
+      {!allWeightsEntered && (
+        <div style={{ fontSize: '12px', color: 'var(--text3)', textAlign: 'center', marginTop: '8px' }}>
+          모든 품목의 실제 중량 입력 후 건너뛰기 가능
+        </div>
+      )}
 
       {/* 최종 확인 바텀시트 */}
       {confirming && (
@@ -450,11 +540,17 @@ function ShipProcess({ target, onUpdate, onComplete, onCancel }) {
               {order.branch_name} · {order.order_number}
             </div>
             {items.map(item => {
-              const p = getItemProgress(item)
+              const p     = getItemProgress(item)
+              const iUnit = item.products?.order_unit ?? item.products?.unit ?? 'kg'
               return (
                 <div key={item.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: '13px', borderBottom: '0.5px solid var(--border)' }}>
                   <span>{item.products?.name}</span>
-                  <span style={{ fontWeight: 600 }}>{p.scanned.toFixed(1)}{item.products?.unit}</span>
+                  <div style={{ textAlign: 'right' }}>
+                    <span style={{ fontWeight: 600 }}>{p.scanned.toFixed(2)}kg</span>
+                    <span style={{ fontSize: '11px', color: 'var(--text3)', marginLeft: '6px' }}>
+                      ({item.requested_qty}{iUnit} 주문)
+                    </span>
+                  </div>
                 </div>
               )
             })}
